@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mirry — Рисуй. Отражай. Вместе.</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0f172a; color: #e2e8f0; overflow: hidden; height: 100vh; }
+  .brand { font-weight: 900; letter-spacing: -0.03em;
+           background: linear-gradient(135deg, #a5b4fc, #f0abfc);
+           -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  #setup { max-width: 480px; margin: 60px auto; padding: 32px;
+           background: rgba(30,41,59,0.8); border-radius: 20px; border: 1px solid rgba(148,163,184,0.15); }
+  #setup h1 { font-size: 3rem; text-align: center; margin-bottom: 8px; }
+  #setup p { text-align: center; color: #94a3b8; margin-bottom: 24px; }
+  #setup label { display: block; font-size: 0.85rem; font-weight: 600;
+                 margin: 16px 0 6px; color: #cbd5e1; }
+  #setup input { width: 100%; padding: 12px; border-radius: 10px;
+                 border: 1px solid #334155; background: #1e293b; color: #f1f5f9;
+                 font-family: monospace; }
+  #setup button { width: 100%; margin-top: 20px; padding: 16px;
+                  background: linear-gradient(135deg, #6366f1, #a855f7); color: #fff;
+                  border: none; border-radius: 12px; font-weight: 700;
+                  font-size: 1rem; cursor: pointer; }
+  #turnstile { margin-top: 16px; }
+  #hint { font-size: 0.85rem; color: #f87171; margin-top: 12px; min-height: 1.2em; text-align: center; }
+  #board { display: none; width: 100vw; height: 100vh; }
+  #canvas { width: 100%; height: 100%; background: #0f172a; cursor: crosshair; }
+  #hud { position: fixed; top: 16px; left: 16px; display: flex; gap: 12px;
+         align-items: center; background: rgba(15,23,42,0.85);
+         backdrop-filter: blur(20px); border: 1px solid rgba(148,163,184,0.2);
+         border-radius: 14px; padding: 10px 16px; z-index: 10; }
+  #hud .logo { font-size: 1.4rem; font-weight: 900; }
+  #hud .room { font-size: 0.75rem; padding: 4px 10px; background: rgba(99,102,241,0.2);
+               border-radius: 20px; color: #a5b4fc; font-family: monospace; }
+  #hud button { padding: 8px 14px; background: linear-gradient(135deg, #6366f1, #a855f7);
+                color: #fff; border: none; border-radius: 8px; font-size: 0.85rem;
+                font-weight: 600; cursor: pointer; }
+  #toolbar { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+             display: flex; gap: 8px; background: rgba(15,23,42,0.9);
+             backdrop-filter: blur(20px); border: 1px solid rgba(148,163,184,0.2);
+             border-radius: 14px; padding: 8px; z-index: 10; }
+  #toolbar button { padding: 10px 16px; background: transparent; color: #cbd5e1;
+                    border: 1px solid rgba(148,163,184,0.2); border-radius: 8px;
+                    font-size: 0.85rem; cursor: pointer; font-weight: 600; }
+  #toolbar button:hover { background: rgba(99,102,241,0.2); }
+  #conn-status { position: fixed; top: 16px; right: 16px; padding: 6px 12px;
+                 border-radius: 20px; font-size: 0.75rem; font-weight: 600; z-index: 10; }
+  .connected { background: rgba(16,185,129,0.2); color: #10b981; }
+  .disconnected { background: rgba(239,68,68,0.2); color: #ef4444; }
+</style>
+</head>
+<body>
+
+<!-- Настройка -->
+<div id="setup">
+  <h1 class="brand">Mirry</h1>
+  <p>Рисуй. Отражай. Вместе.</p>
+  <label>URL Cloudflare Worker</label>
+  <input type="text" id="worker-url" placeholder="https://mirry-worker.твой-ник.workers.dev">
+  <label>Turnstile Site Key (публичный)</label>
+  <input type="text" id="site-key" placeholder="0x4AAAAAAA...">
+  <div id="turnstile"></div>
+  <button onclick="startWithTurnstile()">Войти в Mirry</button>
+  <div id="hint"></div>
+</div>
+
+<!-- Доска -->
+<div id="board">
+  <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="hud">
+    <span class="logo brand">Mirry</span>
+    <span class="room" id="room-badge">room</span>
+    <button onclick="copyShare()">🔗 Поделиться</button>
+  </div>
+  <div id="conn-status" class="disconnected">● offline</div>
+  <div id="toolbar">
+    <button onclick="addNodeCenter()">+ Блок</button>
+    <button onclick="addChildToSelected()">+ Ветка</button>
+    <button onclick="deleteSelected()">🗑 Удалить</button>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// ГЛАВНЫЕ ПЕРЕМЕННЫЕ — ничего больше не трогай
+// ============================================================
+let WORKER_URL = '';
+let TURNSTILE_SITE_KEY = '';
+let SITE_KEY_RENDERED = false;
+// ============================================================
+
+const STORAGE_KEY = 'mirry_config_v1';
+let ws = null;
+let roomId = '';
+let selectedId = null;
+let dragging = null;
+let dragOffset = { x: 0, y: 0 };
+
+const nodes = new Map(); // id -> { id, x, y, label }
+const edges = new Map(); // id -> { id, from, to }
+const svg = document.getElementById('canvas');
+
+// --- Turnstile и запуск ---
+window.startWithTurnstile = async function() {
+  WORKER_URL = document.getElementById('worker-url').value.trim().replace(/\/$/, '');
+  TURNSTILE_SITE_KEY = document.getElementById('site-key').value.trim();
+  const hint = document.getElementById('hint');
+
+  if (!WORKER_URL || !WORKER_URL.startsWith('https://')) {
+    hint.textContent = 'Введи HTTPS URL воркера'; return;
+  }
+  if (!TURNSTILE_SITE_KEY) {
+    hint.textContent = 'Введи Site Key от Turnstile'; return;
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ WORKER_URL, TURNSTILE_SITE_KEY }));
+
+  if (!SITE_KEY_RENDERED) {
+    turnstile.render('#turnstile', {
+      sitekey: TURNSTILE_SITE_KEY,
+      callback: (token) => connect(token),
+    });
+    SITE_KEY_RENDERED = true;
+  } else {
+    const token = turnstile.getResponse();
+    if (!token) { hint.textContent = 'Пройди проверку Turnstile'; return; }
+    connect(token);
+  }
+};
+
+async function connect(turnstileToken) {
+  const hint = document.getElementById('hint');
+  hint.textContent = 'Проверка...';
+
+  // Получаем JWT
+  let jwt;
+  try {
+    const res = await fetch(WORKER_URL + '/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: turnstileToken }),
+    });
+    if (!res.ok) throw new Error('auth failed');
+    jwt = (await res.json()).jwt;
+  } catch (e) {
+    hint.textContent = 'Проверка не пройдена. Попробуй снова.';
+    turnstile.reset();
+    return;
+  }
+
+  // Room ID из URL или новый
+  const params = new URLSearchParams(location.search);
+  roomId = params.get('room');
+  if (!roomId) {
+    roomId = Math.random().toString(36).substring(2, 10);
+    const u = new URL(location);
+    u.searchParams.set('room', roomId);
+    history.replaceState({}, '', u);
+  }
+
+  document.getElementById('setup').style.display = 'none';
+  document.getElementById('board').style.display = 'block';
+  document.getElementById('room-badge').textContent = 'room: ' + roomId;
+
+  openSocket(jwt);
+  attachCanvasEvents();
+}
+
+function openSocket(jwt) {
+  const wsUrl = WORKER_URL.replace(/^http/, 'ws') + '/room/' + roomId + '?jwt=' + jwt;
+  ws = new WebSocket(wsUrl);
+  const status = document.getElementById('conn-status');
+
+  ws.onopen = () => {
+    status.textContent = '● online';
+    status.className = 'connected';
+  };
+  ws.onclose = () => {
+    status.textContent = '● offline';
+    status.className = 'disconnected';
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleServerMessage(msg);
+  };
+}
+
+function handleServerMessage(msg) {
+  if (msg.type === 'snapshot') {
+    nodes.clear(); edges.clear();
+    for (const [id, n] of msg.nodes) nodes.set(id, n);
+    for (const [id, e] of msg.edges) edges.set(id, e);
+    renderAll();
+  } else if (msg.type === 'addNode') {
+    nodes.set(msg.node.id, msg.node); renderAll();
+  } else if (msg.type === 'updateNode') {
+    const n = nodes.get(msg.id);
+    if (n) { Object.assign(n, msg.patch); renderAll(); }
+  } else if (msg.type === 'deleteNode') {
+    nodes.delete(msg.id);
+    for (const [eid, e] of edges) if (e.from === msg.id || e.to === msg.id) edges.delete(eid);
+    renderAll();
+  } else if (msg.type === 'addEdge') {
+    edges.set(msg.edge.id, msg.edge); renderAll();
+  } else if (msg.type === 'deleteEdge') {
+    edges.delete(msg.id); renderAll();
+  }
+}
+
+function send(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+// --- Рендеринг SVG ---
+function renderAll() {
+  svg.innerHTML = '';
+  // Сначала рёбра (под блоками)
+  for (const [, e] of edges) {
+    const a = nodes.get(e.from), b = nodes.get(e.to);
+    if (!a || !b) continue;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const mx = (a.x + b.x) / 2;
+    path.setAttribute('d', `M ${a.x} ${a.y} Q ${mx} ${a.y} ${mx} ${b.y} T ${b.x} ${b.y}`);
+    path.setAttribute('stroke', '#6366f1');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('fill', 'none');
+    svg.appendChild(path);
+  }
+  // Затем блоки
+  for (const [id, n] of nodes) {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('data-id', id);
+    g.setAttribute('transform', `translate(${n.x},${n.y})`);
+    g.style.cursor = 'pointer';
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', -70); rect.setAttribute('y', -22);
+    rect.setAttribute('width', 140); rect.setAttribute('height', 44);
+    rect.setAttribute('rx', 10);
+    rect.setAttribute('fill', id === selectedId ? '#4338ca' : '#1e293b');
+    rect.setAttribute('stroke', id === selectedId ? '#a5b4fc' : '#6366f1');
+    rect.setAttribute('stroke-width', '2');
+    g.appendChild(rect);
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('dominant-baseline', 'middle');
+    text.setAttribute('fill', '#f1f5f9');
+    text.setAttribute('font-size', '14');
+    text.setAttribute('pointer-events', 'none');
+    text.textContent = truncate(n.label, 20);
+    g.appendChild(text);
+    svg.appendChild(g);
+  }
+}
+
+function truncate(s, n) { return s.length > n ? s.slice(0, n-1) + '…' : s; }
+
+function svgPoint(e) {
+  const pt = svg.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+// --- Взаимодействие ---
+function attachCanvasEvents() {
+  svg.addEventListener('pointerdown', (e) => {
+    const g = e.target.closest('g[data-id]');
+    if (g) {
+      dragging = g.dataset.id;
+      selectedId = dragging;
+      const n = nodes.get(dragging);
+      const pt = svgPoint(e);
+      dragOffset.x = n.x - pt.x;
+      dragOffset.y = n.y - pt.y;
+      renderAll();
+    } else {
+      selectedId = null;
+      renderAll();
+    }
+  });
+
+  svg.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const pt = svgPoint(e);
+    const n = nodes.get(dragging);
+    if (!n) return;
+    n.x = Math.round(pt.x + dragOffset.x);
+    n.y = Math.round(pt.y + dragOffset.y);
+    renderAll();
+  });
+
+  svg.addEventListener('pointerup', () => {
+    if (dragging) {
+      const n = nodes.get(dragging);
+      send({ type: 'updateNode', id: dragging, patch: { x: n.x, y: n.y } });
+      dragging = null;
+    }
+  });
+
+  svg.addEventListener('click', (e) => {
+    if (e.target !== svg) return;
+    const pt = svgPoint(e);
+    const id = crypto.randomUUID();
+    const node = { id, x: Math.round(pt.x), y: Math.round(pt.y), label: 'Идея' };
+    nodes.set(id, node);
+    send({ type: 'addNode', node });
+    renderAll();
+  });
+
+  svg.addEventListener('dblclick', (e) => {
+    const g = e.target.closest('g[data-id]');
+    if (!g) return;
+    const id = g.dataset.id;
+    const n = nodes.get(id);
+    const label = prompt('Название:', n.label);
+    if (label !== null) {
+      n.label = label;
+      send({ type: 'updateNode', id, patch: { label } });
+      renderAll();
+    }
+  });
+}
+
+function addNodeCenter() {
+  const id = crypto.randomUUID();
+  const cx = window.innerWidth / 2 - 70 + Math.random() * 100;
+  const cy = window.innerHeight / 2 - 22 + Math.random() * 100;
+  const node = { id, x: Math.round(cx), y: Math.round(cy), label: 'Новая идея' };
+  nodes.set(id, node);
+  send({ type: 'addNode', node });
+  renderAll();
+}
+
+function addChildToSelected() {
+  const parent = nodes.get(selectedId);
+  if (!parent) { alert('Сначала выдели родительский блок'); return; }
+  const id = crypto.randomUUID();
+  const node = { id, x: parent.x + 200, y: parent.y + 80, label: 'Ветка' };
+  nodes.set(id, node);
+  send({ type: 'addNode', node });
+  const edgeId = crypto.randomUUID();
+  const edge = { id: edgeId, from: parent.id, to: id };
+  edges.set(edgeId, edge);
+  send({ type: 'addEdge', edge });
+  selectedId = id;
+  renderAll();
+}
+
+function deleteSelected() {
+  if (!selectedId) return;
+  nodes.delete(selectedId);
+  send({ type: 'deleteNode', id: selectedId });
+  for (const [eid, e] of edges) {
+    if (e.from === selectedId || e.to === selectedId) {
+      edges.delete(eid);
+      send({ type: 'deleteEdge', id: eid });
+    }
+  }
+  selectedId = null;
+  renderAll();
+}
+
+function copyShare() {
+  navigator.clipboard.writeText(location.href).then(() => {
+    alert('Ссылка скопирована! Отправь её другу.');
+  });
+}
+
+// --- Восстановление конфига при загрузке ---
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  if (saved.WORKER_URL) document.getElementById('worker-url').value = saved.WORKER_URL;
+  if (saved.TURNSTILE_SITE_KEY) document.getElementById('site-key').value = saved.TURNSTILE_SITE_KEY;
+});
+</script>
+</body>
+</html>
