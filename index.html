@@ -9,26 +9,18 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
          background: #0f172a; color: #e2e8f0; overflow: hidden; height: 100vh; }
-  .brand { font-weight: 900; letter-spacing: -0.03em;
+  
+  #loading-screen { position: fixed; inset: 0; display: flex; flex-direction: column;
+                    align-items: center; justify-content: center; background: #0f172a; z-index: 100; }
+  .brand { font-size: 4rem; font-weight: 900; letter-spacing: -0.03em;
            background: linear-gradient(135deg, #a5b4fc, #f0abfc);
            -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-  #setup { max-width: 480px; margin: 60px auto; padding: 32px;
-           background: rgba(30,41,59,0.8); border-radius: 20px; border: 1px solid rgba(148,163,184,0.15); }
-  #setup h1 { font-size: 3rem; text-align: center; margin-bottom: 8px; }
-  #setup p { text-align: center; color: #94a3b8; margin-bottom: 24px; }
-  #setup label { display: block; font-size: 0.85rem; font-weight: 600;
-                 margin: 16px 0 6px; color: #cbd5e1; }
-  #setup input { width: 100%; padding: 12px; border-radius: 10px;
-                 border: 1px solid #334155; background: #1e293b; color: #f1f5f9;
-                 font-family: monospace; }
-  #setup button { width: 100%; margin-top: 20px; padding: 16px;
-                  background: linear-gradient(135deg, #6366f1, #a855f7); color: #fff;
-                  border: none; border-radius: 12px; font-weight: 700;
-                  font-size: 1rem; cursor: pointer; }
-  #turnstile { margin-top: 16px; }
-  #hint { font-size: 0.85rem; color: #f87171; margin-top: 12px; min-height: 1.2em; text-align: center; }
+  #status-text { margin-top: 16px; color: #94a3b8; font-size: 1.1rem; }
+  #turnstile-container { margin-top: 20px; }
+
   #board { display: none; width: 100vw; height: 100vh; }
   #canvas { width: 100%; height: 100%; background: #0f172a; cursor: crosshair; }
+  
   #hud { position: fixed; top: 16px; left: 16px; display: flex; gap: 12px;
          align-items: center; background: rgba(15,23,42,0.85);
          backdrop-filter: blur(20px); border: 1px solid rgba(148,163,184,0.2);
@@ -39,6 +31,7 @@
   #hud button { padding: 8px 14px; background: linear-gradient(135deg, #6366f1, #a855f7);
                 color: #fff; border: none; border-radius: 8px; font-size: 0.85rem;
                 font-weight: 600; cursor: pointer; }
+  
   #toolbar { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
              display: flex; gap: 8px; background: rgba(15,23,42,0.9);
              backdrop-filter: blur(20px); border: 1px solid rgba(148,163,184,0.2);
@@ -47,6 +40,7 @@
                     border: 1px solid rgba(148,163,184,0.2); border-radius: 8px;
                     font-size: 0.85rem; cursor: pointer; font-weight: 600; }
   #toolbar button:hover { background: rgba(99,102,241,0.2); }
+  
   #conn-status { position: fixed; top: 16px; right: 16px; padding: 6px 12px;
                  border-radius: 20px; font-size: 0.75rem; font-weight: 600; z-index: 10; }
   .connected { background: rgba(16,185,129,0.2); color: #10b981; }
@@ -55,28 +49,23 @@
 </head>
 <body>
 
-<!-- Настройка -->
-<div id="setup">
-  <h1 class="brand">Mirry</h1>
-  <p>Рисуй. Отражай. Вместе.</p>
-  <label>URL Cloudflare Worker</label>
-  <input type="text" id="worker-url" placeholder="https://mirry-worker.твой-ник.workers.dev">
-  <label>Turnstile Site Key (публичный)</label>
-  <input type="text" id="site-key" placeholder="0x4AAAAAAA...">
-  <div id="turnstile"></div>
-  <button onclick="startWithTurnstile()">Войти в Mirry</button>
-  <div id="hint"></div>
+<div id="loading-screen">
+  <div class="brand">Mirry</div>
+  <div id="status-text">Проверка безопасности...</div>
+  <div id="turnstile-container"></div>
 </div>
 
-<!-- Доска -->
 <div id="board">
   <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+  
   <div id="hud">
     <span class="logo brand">Mirry</span>
     <span class="room" id="room-badge">room</span>
     <button onclick="copyShare()">🔗 Поделиться</button>
   </div>
+  
   <div id="conn-status" class="disconnected">● offline</div>
+  
   <div id="toolbar">
     <button onclick="addNodeCenter()">+ Блок</button>
     <button onclick="addChildToSelected()">+ Ветка</button>
@@ -86,56 +75,39 @@
 
 <script>
 // ============================================================
-// ГЛАВНЫЕ ПЕРЕМЕННЫЕ — ничего больше не трогай
+// ВСТАВЬ СЮДА URL СВОЕГО CLOUDFLARE WORKER (без слэша на конце)
 // ============================================================
-let WORKER_URL = '';
-let TURNSTILE_SITE_KEY = '';
-let SITE_KEY_RENDERED = false;
+const WORKER_URL = 'https://mirry-worker.твой-ник.workers.dev'; 
+// Твой публичный ключ уже вставлен:
+const TURNSTILE_SITE_KEY = '0x4AAAAAAFfAYwEHU_CD0qWc'; 
 // ============================================================
 
-const STORAGE_KEY = 'mirry_config_v1';
 let ws = null;
 let roomId = '';
 let selectedId = null;
 let dragging = null;
 let dragOffset = { x: 0, y: 0 };
 
-const nodes = new Map(); // id -> { id, x, y, label }
-const edges = new Map(); // id -> { id, from, to }
+const nodes = new Map();
+const edges = new Map();
 const svg = document.getElementById('canvas');
 
-// --- Turnstile и запуск ---
-window.startWithTurnstile = async function() {
-  WORKER_URL = document.getElementById('worker-url').value.trim().replace(/\/$/, '');
-  TURNSTILE_SITE_KEY = document.getElementById('site-key').value.trim();
-  const hint = document.getElementById('hint');
-
-  if (!WORKER_URL || !WORKER_URL.startsWith('https://')) {
-    hint.textContent = 'Введи HTTPS URL воркера'; return;
+window.addEventListener('DOMContentLoaded', () => {
+  if (WORKER_URL.includes('твой-ник')) {
+    document.getElementById('status-text').textContent = 'Ошибка: вставь URL воркера в код.';
+    return;
   }
-  if (!TURNSTILE_SITE_KEY) {
-    hint.textContent = 'Введи Site Key от Turnstile'; return;
-  }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ WORKER_URL, TURNSTILE_SITE_KEY }));
 
-  if (!SITE_KEY_RENDERED) {
-    turnstile.render('#turnstile', {
-      sitekey: TURNSTILE_SITE_KEY,
-      callback: (token) => connect(token),
-    });
-    SITE_KEY_RENDERED = true;
-  } else {
-    const token = turnstile.getResponse();
-    if (!token) { hint.textContent = 'Пройди проверку Turnstile'; return; }
-    connect(token);
-  }
-};
+  turnstile.render('#turnstile-container', {
+    sitekey: TURNSTILE_SITE_KEY,
+    callback: (token) => {
+      document.getElementById('status-text').textContent = 'Подключение к комнате...';
+      authenticate(token);
+    },
+  });
+});
 
-async function connect(turnstileToken) {
-  const hint = document.getElementById('hint');
-  hint.textContent = 'Проверка...';
-
-  // Получаем JWT
+async function authenticate(turnstileToken) {
   let jwt;
   try {
     const res = await fetch(WORKER_URL + '/auth', {
@@ -146,12 +118,11 @@ async function connect(turnstileToken) {
     if (!res.ok) throw new Error('auth failed');
     jwt = (await res.json()).jwt;
   } catch (e) {
-    hint.textContent = 'Проверка не пройдена. Попробуй снова.';
+    document.getElementById('status-text').textContent = 'Ошибка проверки. Обнови страницу.';
     turnstile.reset();
     return;
   }
 
-  // Room ID из URL или новый
   const params = new URLSearchParams(location.search);
   roomId = params.get('room');
   if (!roomId) {
@@ -161,7 +132,7 @@ async function connect(turnstileToken) {
     history.replaceState({}, '', u);
   }
 
-  document.getElementById('setup').style.display = 'none';
+  document.getElementById('loading-screen').style.display = 'none';
   document.getElementById('board').style.display = 'block';
   document.getElementById('room-badge').textContent = 'room: ' + roomId;
 
@@ -214,10 +185,8 @@ function send(obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
 
-// --- Рендеринг SVG ---
 function renderAll() {
   svg.innerHTML = '';
-  // Сначала рёбра (под блоками)
   for (const [, e] of edges) {
     const a = nodes.get(e.from), b = nodes.get(e.to);
     if (!a || !b) continue;
@@ -229,7 +198,6 @@ function renderAll() {
     path.setAttribute('fill', 'none');
     svg.appendChild(path);
   }
-  // Затем блоки
   for (const [id, n] of nodes) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('data-id', id);
@@ -249,13 +217,11 @@ function renderAll() {
     text.setAttribute('fill', '#f1f5f9');
     text.setAttribute('font-size', '14');
     text.setAttribute('pointer-events', 'none');
-    text.textContent = truncate(n.label, 20);
+    text.textContent = n.label.length > 20 ? n.label.slice(0, 19) + '…' : n.label;
     g.appendChild(text);
     svg.appendChild(g);
   }
 }
-
-function truncate(s, n) { return s.length > n ? s.slice(0, n-1) + '…' : s; }
 
 function svgPoint(e) {
   const pt = svg.createSVGPoint();
@@ -263,7 +229,6 @@ function svgPoint(e) {
   return pt.matrixTransform(svg.getScreenCTM().inverse());
 }
 
-// --- Взаимодействие ---
 function attachCanvasEvents() {
   svg.addEventListener('pointerdown', (e) => {
     const g = e.target.closest('g[data-id]');
@@ -367,13 +332,6 @@ function copyShare() {
     alert('Ссылка скопирована! Отправь её другу.');
   });
 }
-
-// --- Восстановление конфига при загрузке ---
-window.addEventListener('DOMContentLoaded', () => {
-  const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-  if (saved.WORKER_URL) document.getElementById('worker-url').value = saved.WORKER_URL;
-  if (saved.TURNSTILE_SITE_KEY) document.getElementById('site-key').value = saved.TURNSTILE_SITE_KEY;
-});
 </script>
 </body>
 </html>
